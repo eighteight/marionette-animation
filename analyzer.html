@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Marionette — Recording Analyzer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a0a; color: #e0e0e0;
+      font-family: 'Courier New', monospace;
+      display: flex; flex-direction: column;
+      align-items: center; padding: 24px; gap: 16px;
+    }
+    h1 { font-size: 13px; letter-spacing: 3px; color: #555; }
+
+    #drop-zone {
+      width: 700px; height: 80px;
+      border: 1px dashed #333;
+      display: flex; align-items: center; justify-content: center;
+      color: #444; font-size: 12px; cursor: pointer;
+      transition: border-color 0.2s;
+    }
+    #drop-zone.over { border-color: #4a8a4a; color: #4a8a4a; }
+
+    #main { display: flex; gap: 20px; width: 900px; }
+
+    /* stick figure canvas */
+    #stick-wrap {
+      position: relative;
+      width: 320px; height: 420px;
+      background: #0d0d0d; border: 1px solid #1a1a1a;
+      flex-shrink: 0;
+    }
+    #stick-canvas { display: block; }
+
+    /* timeline */
+    #right { flex: 1; display: flex; flex-direction: column; gap: 12px; }
+
+    #timeline-wrap {
+      position: relative; height: 60px;
+      background: #0d0d0d; border: 1px solid #1a1a1a;
+    }
+    #timeline-canvas { display: block; cursor: pointer; }
+
+    /* stats grid */
+    #stats {
+      display: grid; grid-template-columns: 1fr 1fr;
+      gap: 6px;
+    }
+    .stat-box {
+      background: #0d0d0d; border: 1px solid #1a1a1a;
+      padding: 8px 10px;
+    }
+    .stat-label { font-size: 9px; letter-spacing: 1px; color: #444; text-transform: uppercase; }
+    .stat-value { font-size: 16px; color: #aaa; margin-top: 2px; }
+
+    /* joint table */
+    #joint-table {
+      font-size: 10px; color: #555;
+      border-collapse: collapse; width: 100%;
+    }
+    #joint-table th {
+      text-align: left; padding: 3px 6px;
+      border-bottom: 1px solid #1a1a1a; color: #333;
+      font-weight: normal; letter-spacing: 1px;
+    }
+    #joint-table td { padding: 2px 6px; }
+    #joint-table tr:hover td { background: #111; color: #888; }
+
+    .bar {
+      display: inline-block; height: 6px;
+      background: #4a8a4a; border-radius: 1px;
+      vertical-align: middle;
+    }
+    .bar.low { background: #8a4a2a; }
+
+    /* playback controls */
+    #playback {
+      display: flex; gap: 8px; align-items: center;
+    }
+    button {
+      background: #1a1a1a; border: 1px solid #333;
+      color: #e0e0e0; padding: 6px 12px;
+      font-family: 'Courier New', monospace; font-size: 11px;
+      cursor: pointer; border-radius: 3px;
+    }
+    button:hover { background: #252525; }
+    button.active { background: #1a3a1a; border-color: #4a8a4a; color: #7dff7d; }
+    #frame-label { font-size: 11px; color: #555; }
+
+    #issues { font-size: 10px; color: #555; line-height: 1.8; }
+    .issue-ok  { color: #4a8a4a; }
+    .issue-warn { color: #8a7a2a; }
+    .issue-err  { color: #8a2a2a; }
+  </style>
+</head>
+<body>
+  <h1>RECORDING ANALYZER</h1>
+
+  <div id="drop-zone">Drop skeleton JSON here, or click to open</div>
+  <input type="file" id="file-input" accept=".json" style="display:none" />
+
+  <div id="main" style="display:none">
+    <div id="stick-wrap">
+      <canvas id="stick-canvas" width="320" height="420"></canvas>
+    </div>
+
+    <div id="right">
+      <div id="stats">
+        <div class="stat-box">
+          <div class="stat-label">Frames</div>
+          <div class="stat-value" id="sv-frames">—</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">Duration</div>
+          <div class="stat-value" id="sv-duration">—</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">Avg FPS</div>
+          <div class="stat-value" id="sv-fps">—</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-label">Captured</div>
+          <div class="stat-value" id="sv-date" style="font-size:11px;margin-top:4px">—</div>
+        </div>
+      </div>
+
+      <div id="playback">
+        <button id="btn-play">▶ Play</button>
+        <button id="btn-loop">↺ Loop</button>
+        <span id="frame-label">frame 0 / 0</span>
+      </div>
+
+      <div id="timeline-wrap">
+        <canvas id="timeline-canvas" width="560" height="60"></canvas>
+      </div>
+
+      <div id="issues"></div>
+
+      <table id="joint-table">
+        <thead>
+          <tr>
+            <th>Joint</th>
+            <th>Avg Visibility</th>
+            <th>Min Vis</th>
+            <th>Frames OK</th>
+          </tr>
+        </thead>
+        <tbody id="joint-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</body>
+
+<script>
+const CONNECTIONS = [
+  [11,12],[11,13],[13,15],[12,14],[14,16],
+  [11,23],[12,24],[23,24],
+  [23,25],[25,27],[27,29],[27,31],
+  [24,26],[26,28],[28,30],[28,32],
+];
+
+const JOINT_LABELS = {
+  0:'nose',
+  11:'L.shoulder', 12:'R.shoulder',
+  13:'L.elbow',    14:'R.elbow',
+  15:'L.wrist',    16:'R.wrist',
+  23:'L.hip',      24:'R.hip',
+  25:'L.knee',     26:'R.knee',
+  27:'L.ankle',    28:'R.ankle',
+};
+
+let data = null;
+let currentFrame = 0;
+let playing = false;
+let looping = true;
+let playInterval = null;
+
+// ── Drop / file open ──
+const dropZone = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault(); dropZone.classList.remove('over');
+  const file = e.dataTransfer.files[0];
+  if (file) loadFile(file);
+});
+fileInput.addEventListener('change', e => {
+  if (e.target.files[0]) loadFile(e.target.files[0]);
+});
+
+function loadFile(file) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      data = JSON.parse(e.target.result);
+      onDataLoaded();
+    } catch(err) {
+      alert('Invalid JSON: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+}
+
+function onDataLoaded() {
+  document.getElementById('main').style.display = 'flex';
+  document.getElementById('drop-zone').textContent = '✓ ' + data.frameCount + ' frames loaded';
+
+  // Stats
+  document.getElementById('sv-frames').textContent = data.frameCount;
+  document.getElementById('sv-duration').textContent = data.duration.toFixed(2) + 's';
+  document.getElementById('sv-fps').textContent = data.avgFps.toFixed(1);
+  document.getElementById('sv-date').textContent = new Date(data.capturedAt).toLocaleString();
+
+  // Analyze joints
+  analyzeJoints();
+
+  // Draw timeline
+  drawTimeline();
+
+  // Show first frame
+  currentFrame = 0;
+  drawFrame(currentFrame);
+  updateFrameLabel();
+
+  // Timeline click
+  document.getElementById('timeline-canvas').addEventListener('click', e => {
+    const rect = e.target.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const pct = x / e.target.width;
+    currentFrame = Math.floor(pct * data.frames.length);
+    drawFrame(currentFrame);
+    updateFrameLabel();
+  });
+}
+
+// ── Joint analysis ──
+function analyzeJoints() {
+  const tbody = document.getElementById('joint-tbody');
+  tbody.innerHTML = '';
+  const issues = document.getElementById('issues');
+  const issueLines = [];
+
+  const keyJoints = [11,12,13,14,15,16,23,24,25,26,27,28];
+
+  keyJoints.forEach(idx => {
+    const label = JOINT_LABELS[idx] || idx;
+    const visibilities = data.frames.map(f => f.lm[idx]?.v ?? 0);
+    const avg = visibilities.reduce((a,b) => a+b, 0) / visibilities.length;
+    const min = Math.min(...visibilities);
+    const okFrames = visibilities.filter(v => v > 0.5).length;
+    const okPct = (okFrames / visibilities.length * 100).toFixed(0);
+
+    const tr = document.createElement('tr');
+    const barW = Math.round(avg * 80);
+    const barClass = avg < 0.5 ? 'low' : '';
+    tr.innerHTML = `
+      <td>${label}</td>
+      <td><span class="bar ${barClass}" style="width:${barW}px"></span> ${(avg*100).toFixed(0)}%</td>
+      <td>${(min*100).toFixed(0)}%</td>
+      <td>${okPct}%</td>
+    `;
+    tbody.appendChild(tr);
+
+    if (avg < 0.4) {
+      issueLines.push(`<div class="issue-err">⚠ ${label}: low avg visibility (${(avg*100).toFixed(0)}%) — may cause bad retargeting</div>`);
+    } else if (avg < 0.65) {
+      issueLines.push(`<div class="issue-warn">△ ${label}: moderate visibility (${(avg*100).toFixed(0)}%)</div>`);
+    }
+  });
+
+  // Frame rate consistency
+  if (data.frames.length > 2) {
+    const dts = [];
+    for (let i = 1; i < data.frames.length; i++) {
+      dts.push(data.frames[i].t - data.frames[i-1].t);
+    }
+    const avgDt = dts.reduce((a,b)=>a+b,0)/dts.length;
+    const maxDt = Math.max(...dts);
+    if (maxDt > avgDt * 3) {
+      issueLines.push(`<div class="issue-warn">△ Frame timing: max gap ${(maxDt*1000).toFixed(0)}ms (avg ${(avgDt*1000).toFixed(0)}ms) — some dropped frames</div>`);
+    } else {
+      issueLines.push(`<div class="issue-ok">✓ Frame timing consistent (avg ${(avgDt*1000).toFixed(0)}ms)</div>`);
+    }
+  }
+
+  if (issueLines.length === 0) {
+    issueLines.push('<div class="issue-ok">✓ No issues found — recording looks good</div>');
+  }
+
+  issues.innerHTML = issueLines.join('');
+}
+
+// ── Timeline: visibility heatmap ──
+function drawTimeline() {
+  const canvas = document.getElementById('timeline-canvas');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  const keyJoints = [11,12,13,14,15,16,23,24,25,26,27,28];
+  const rowH = H / keyJoints.length;
+
+  data.frames.forEach((frame, fi) => {
+    const x = (fi / data.frames.length) * W;
+    const w = Math.max(1, W / data.frames.length);
+
+    keyJoints.forEach((jIdx, row) => {
+      const vis = frame.lm[jIdx]?.v ?? 0;
+      const g = Math.round(vis * 180);
+      ctx.fillStyle = `rgb(${Math.round(g*0.3)},${g},${Math.round(g*0.3)})`;
+      ctx.fillRect(x, row * rowH, w, rowH - 0.5);
+    });
+  });
+
+  // Playhead
+  ctx.strokeStyle = '#cc3333';
+  ctx.lineWidth = 1;
+  const px = (currentFrame / data.frames.length) * W;
+  ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, H); ctx.stroke();
+}
+
+// ── Stick figure ──
+function drawFrame(fi) {
+  const canvas = document.getElementById('stick-canvas');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  const frame = data.frames[fi];
+  if (!frame) return;
+
+  const lms = frame.lm;
+  const PAD = 30;
+
+  // Map normalized [0,1] coords to canvas, mirror X
+  function px(lm) {
+    return {
+      x: (1 - lm.x) * (W - PAD*2) + PAD,
+      y: lm.y * (H - PAD*2) + PAD
+    };
+  }
+
+  // Draw connections
+  CONNECTIONS.forEach(([a,b]) => {
+    const la = lms[a], lb = lms[b];
+    if (!la || !lb) return;
+    const pa = px(la), pb = px(lb);
+    const vis = Math.min(la.v, lb.v);
+    ctx.strokeStyle = `rgba(74,138,74,${vis * 0.9 + 0.1})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(pa.x, pa.y);
+    ctx.lineTo(pb.x, pb.y);
+    ctx.stroke();
+  });
+
+  // Draw joints
+  Object.keys(lms).forEach(i => {
+    const l = lms[i];
+    const p = px(l);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 5, 0, Math.PI*2);
+    ctx.fillStyle = l.v > 0.7 ? '#7dff7d' : l.v > 0.4 ? '#8a8a2a' : '#555';
+    ctx.fill();
+  });
+
+  // Labels for key joints
+  ctx.fillStyle = '#4a8a4a';
+  ctx.font = '9px Courier New';
+  [[11,'LS'],[12,'RS'],[23,'LH'],[24,'RH'],[0,'nose']].forEach(([i,label]) => {
+    const l = lms[i];
+    if (l) { const p = px(l); ctx.fillText(label, p.x+6, p.y-4); }
+  });
+
+  // Frame info
+  ctx.fillStyle = '#333';
+  ctx.font = '10px Courier New';
+  ctx.fillText(`t=${frame.t.toFixed(3)}s`, 8, H - 8);
+
+  // Redraw playhead on timeline
+  drawTimeline();
+  const tlCanvas = document.getElementById('timeline-canvas');
+  const tlCtx = tlCanvas.getContext('2d');
+  const px2 = (fi / data.frames.length) * tlCanvas.width;
+  tlCtx.strokeStyle = '#cc3333';
+  tlCtx.lineWidth = 1;
+  tlCtx.beginPath();
+  tlCtx.moveTo(px2, 0); tlCtx.lineTo(px2, tlCanvas.height);
+  tlCtx.stroke();
+}
+
+function updateFrameLabel() {
+  document.getElementById('frame-label').textContent =
+    `frame ${currentFrame} / ${data ? data.frames.length - 1 : 0}  (t=${data?.frames[currentFrame]?.t.toFixed(3)}s)`;
+}
+
+// ── Playback ──
+document.getElementById('btn-play').addEventListener('click', () => {
+  if (playing) {
+    clearInterval(playInterval);
+    playing = false;
+    document.getElementById('btn-play').textContent = '▶ Play';
+    document.getElementById('btn-play').classList.remove('active');
+  } else {
+    if (!data) return;
+    playing = true;
+    document.getElementById('btn-play').textContent = '⏸ Pause';
+    document.getElementById('btn-play').classList.add('active');
+    const fps = data.avgFps || 30;
+    playInterval = setInterval(() => {
+      currentFrame++;
+      if (currentFrame >= data.frames.length) {
+        if (looping) currentFrame = 0;
+        else { clearInterval(playInterval); playing = false; return; }
+      }
+      drawFrame(currentFrame);
+      updateFrameLabel();
+    }, 1000 / fps);
+  }
+});
+
+document.getElementById('btn-loop').addEventListener('click', () => {
+  looping = !looping;
+  document.getElementById('btn-loop').classList.toggle('active', looping);
+});
+</script>
+</html>

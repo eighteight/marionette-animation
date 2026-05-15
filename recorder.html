@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Marionette — Skeleton Recorder</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a0a;
+      color: #e0e0e0;
+      font-family: 'Courier New', monospace;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 24px;
+      gap: 16px;
+      min-height: 100vh;
+    }
+    h1 { font-size: 13px; letter-spacing: 3px; color: #555; }
+
+    #main {
+      display: flex;
+      gap: 20px;
+      align-items: flex-start;
+    }
+
+    #cam-wrap {
+      position: relative;
+      width: 480px;
+      height: 360px;
+      background: #000;
+      border: 1px solid #222;
+    }
+    #webcam {
+      width: 480px; height: 360px;
+      object-fit: cover;
+      transform: scaleX(-1);
+      display: block;
+    }
+    #pose-canvas {
+      position: absolute; top: 0; left: 0;
+      width: 480px; height: 360px;
+      transform: scaleX(-1);
+      pointer-events: none;
+    }
+
+    /* recording indicator */
+    #rec-dot {
+      position: absolute; top: 10px; right: 10px;
+      width: 12px; height: 12px;
+      border-radius: 50%;
+      background: #333;
+    }
+    #rec-dot.recording {
+      background: #cc3333;
+      box-shadow: 0 0 8px #cc3333;
+      animation: blink 1s infinite;
+    }
+    @keyframes blink { 50% { opacity: 0.3; } }
+
+    #panel {
+      width: 260px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    button {
+      background: #1a1a1a;
+      border: 1px solid #333;
+      color: #e0e0e0;
+      padding: 9px 14px;
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+      cursor: pointer;
+      border-radius: 3px;
+      transition: all 0.15s;
+      width: 100%;
+      text-align: left;
+    }
+    button:hover { background: #252525; border-color: #555; }
+    button:disabled { opacity: 0.3; cursor: default; }
+    button.active { background: #3a1a1a; border-color: #cc3333; color: #ff9999; }
+    button.green { background: #1a3a1a; border-color: #4a8a4a; color: #7dff7d; }
+
+    .stat { font-size: 11px; color: #555; }
+    .stat span { color: #aaa; }
+
+    #log {
+      font-size: 10px;
+      color: #444;
+      height: 120px;
+      overflow-y: auto;
+      border: 1px solid #1a1a1a;
+      padding: 6px;
+      line-height: 1.6;
+    }
+    #log .ok  { color: #4a8a4a; }
+    #log .err { color: #8a2a2a; }
+    #log .info { color: #555; }
+
+    hr { border: none; border-top: 1px solid #1e1e1e; width: 100%; }
+  </style>
+</head>
+<body>
+  <h1>SKELETON RECORDER</h1>
+
+  <div id="main">
+    <div id="cam-wrap">
+      <video id="webcam" autoplay playsinline muted></video>
+      <canvas id="pose-canvas" width="480" height="360"></canvas>
+      <div id="rec-dot"></div>
+    </div>
+
+    <div id="panel">
+      <button id="btn-cam">▶ Start Camera</button>
+      <button id="btn-record" disabled>⏺ Start Recording</button>
+      <button id="btn-save" disabled>💾 Save Recording</button>
+
+      <hr />
+      <div class="stat">Status: <span id="stat-status">idle</span></div>
+      <div class="stat">Frames: <span id="stat-frames">0</span></div>
+      <div class="stat">Duration: <span id="stat-duration">0.0s</span></div>
+      <div class="stat">Confidence: <span id="stat-conf">—</span></div>
+      <div class="stat">FPS: <span id="stat-fps">—</span></div>
+
+      <hr />
+      <div id="log"><div class="info">Ready.</div></div>
+    </div>
+  </div>
+</body>
+
+<script>
+// ── MediaPipe landmark indices we care about ──
+const LANDMARK_NAMES = {
+  0:'nose',
+  11:'left_shoulder', 12:'right_shoulder',
+  13:'left_elbow',    14:'right_elbow',
+  15:'left_wrist',    16:'right_wrist',
+  23:'left_hip',      24:'right_hip',
+  25:'left_knee',     26:'right_knee',
+  27:'left_ankle',    28:'right_ankle',
+  29:'left_heel',     30:'right_heel',
+  31:'left_foot_index', 32:'right_foot_index',
+};
+const LANDMARK_INDICES = Object.keys(LANDMARK_NAMES).map(Number);
+
+const CONNECTIONS = [
+  [11,12],[11,13],[13,15],[12,14],[14,16],
+  [11,23],[12,24],[23,24],
+  [23,25],[25,27],[27,29],[27,31],
+  [24,26],[26,28],[28,30],[28,32],
+];
+
+// ── State ──
+let recording = false;
+let frames = [];
+let recordStart = 0;
+let poseDetector = null;
+let poseRunning = false;
+let lastFrameTime = 0;
+let fpsAccum = 0, fpsCount = 0, fpsLast = 0;
+
+function log(msg, cls = 'info') {
+  const el = document.getElementById('log');
+  const d = document.createElement('div');
+  d.className = cls;
+  d.textContent = new Date().toLocaleTimeString() + ' ' + msg;
+  el.appendChild(d);
+  el.scrollTop = el.scrollHeight;
+}
+
+// ── Camera ──
+document.getElementById('btn-cam').addEventListener('click', async () => {
+  const video = document.getElementById('webcam');
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 640, height: 480, facingMode: 'user' }, audio: false
+    });
+    video.srcObject = stream;
+    await new Promise(r => video.onloadedmetadata = r);
+    log('Camera started', 'ok');
+    document.getElementById('btn-cam').textContent = '■ Camera On';
+    document.getElementById('btn-cam').classList.add('active');
+    await initPose();
+  } catch(e) {
+    log('Camera error: ' + e.message, 'err');
+  }
+});
+
+// ── MediaPipe ──
+async function loadScript(src) {
+  return new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = src; s.onload = res; s.onerror = rej;
+    document.head.appendChild(s);
+  });
+}
+
+async function initPose() {
+  log('Loading MediaPipe…');
+  await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/pose.js');
+  poseDetector = new window.Pose({
+    locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/${f}`
+  });
+  poseDetector.setOptions({
+    modelComplexity: 1,
+    smoothLandmarks: true,
+    enableSegmentation: false,
+    minDetectionConfidence: 0.5,
+    minTrackingConfidence: 0.5,
+  });
+  poseDetector.onResults(onResults);
+  await poseDetector.initialize();
+  log('MediaPipe ready', 'ok');
+  document.getElementById('btn-record').disabled = false;
+  poseRunning = true;
+  runLoop();
+}
+
+async function runLoop() {
+  if (!poseRunning) return;
+  const video = document.getElementById('webcam');
+  if (video.readyState >= 2) await poseDetector.send({ image: video });
+  requestAnimationFrame(runLoop);
+}
+
+// ── Pose results ──
+function onResults(results) {
+  drawOverlay(results);
+
+  const now = performance.now();
+
+  // FPS
+  fpsCount++;
+  if (now - fpsLast > 1000) {
+    document.getElementById('stat-fps').textContent =
+      Math.round(fpsCount * 1000 / (now - fpsLast)) + ' fps';
+    fpsCount = 0; fpsLast = now;
+  }
+
+  if (!results.poseLandmarks) {
+    document.getElementById('stat-conf').textContent = 'no detection';
+    return;
+  }
+
+  const lms = results.poseLandmarks;
+
+  // Average visibility of key joints
+  const keyJoints = [11,12,23,24,13,14,25,26];
+  const avgVis = keyJoints.reduce((s,i) => s + (lms[i]?.visibility || 0), 0) / keyJoints.length;
+  document.getElementById('stat-conf').textContent = (avgVis * 100).toFixed(0) + '%';
+
+  if (!recording) return;
+
+  // Build compact frame: only the landmarks we need
+  const frame = {
+    t: (now - recordStart) / 1000,  // seconds since recording start
+    lm: {}
+  };
+  LANDMARK_INDICES.forEach(i => {
+    const l = lms[i];
+    if (l) {
+      frame.lm[i] = {
+        x: parseFloat(l.x.toFixed(4)),
+        y: parseFloat(l.y.toFixed(4)),
+        z: parseFloat(l.z.toFixed(4)),
+        v: parseFloat((l.visibility || 0).toFixed(3))
+      };
+    }
+  });
+
+  frames.push(frame);
+
+  const elapsed = (now - recordStart) / 1000;
+  document.getElementById('stat-frames').textContent = frames.length;
+  document.getElementById('stat-duration').textContent = elapsed.toFixed(1) + 's';
+}
+
+// ── Record button ──
+document.getElementById('btn-record').addEventListener('click', () => {
+  if (!recording) {
+    frames = [];
+    recordStart = performance.now();
+    recording = true;
+    document.getElementById('rec-dot').classList.add('recording');
+    document.getElementById('btn-record').classList.add('active');
+    document.getElementById('btn-record').textContent = '⏹ Stop Recording';
+    document.getElementById('btn-save').disabled = true;
+    document.getElementById('stat-status').textContent = 'recording';
+    log('Recording started', 'ok');
+  } else {
+    recording = false;
+    document.getElementById('rec-dot').classList.remove('recording');
+    document.getElementById('btn-record').classList.remove('active');
+    document.getElementById('btn-record').textContent = '⏺ Start Recording';
+    document.getElementById('btn-save').disabled = frames.length === 0;
+    document.getElementById('stat-status').textContent = 'stopped';
+    log(`Recorded ${frames.length} frames (${frames[frames.length-1]?.t.toFixed(2)}s)`, 'ok');
+  }
+});
+
+// ── Save ──
+document.getElementById('btn-save').addEventListener('click', () => {
+  if (frames.length === 0) return;
+
+  const duration = frames[frames.length - 1].t;
+  const fps = frames.length / duration;
+
+  const recording = {
+    version: 1,
+    capturedAt: new Date().toISOString(),
+    frameCount: frames.length,
+    duration: parseFloat(duration.toFixed(3)),
+    avgFps: parseFloat(fps.toFixed(1)),
+    landmarkNames: LANDMARK_NAMES,
+    frames
+  };
+
+  const json = JSON.stringify(recording, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `skeleton_${new Date().toISOString().replace(/[:.]/g,'-').slice(0,19)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  log(`Saved ${frames.length} frames, ${duration.toFixed(2)}s @ ${fps.toFixed(1)}fps`, 'ok');
+});
+
+// ── Draw overlay ──
+function drawOverlay(results) {
+  const canvas = document.getElementById('pose-canvas');
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!results.poseLandmarks) return;
+
+  const lms = results.poseLandmarks;
+  const W = canvas.width, H = canvas.height;
+
+  ctx.strokeStyle = 'rgba(74,138,74,0.9)';
+  ctx.lineWidth = 2;
+  CONNECTIONS.forEach(([a,b]) => {
+    if (!lms[a] || !lms[b]) return;
+    ctx.beginPath();
+    ctx.moveTo(lms[a].x * W, lms[a].y * H);
+    ctx.lineTo(lms[b].x * W, lms[b].y * H);
+    ctx.stroke();
+  });
+
+  LANDMARK_INDICES.forEach(i => {
+    const l = lms[i];
+    if (!l) return;
+    ctx.beginPath();
+    ctx.arc(l.x * W, l.y * H, 4, 0, Math.PI * 2);
+    ctx.fillStyle = l.visibility > 0.7 ? '#7dff7d' : '#666';
+    ctx.fill();
+  });
+
+  // Label a few key joints
+  ctx.fillStyle = '#4a8a4a';
+  ctx.font = '9px Courier New';
+  [[11,'LS'],[12,'RS'],[23,'LH'],[24,'RH']].forEach(([i,label]) => {
+    const l = lms[i];
+    if (l) ctx.fillText(label, l.x * W + 5, l.y * H - 4);
+  });
+}
+</script>
+</html>
