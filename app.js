@@ -453,6 +453,18 @@ function applyLandmarkFrame(lms, delta = 1 / 60) {
 }
 
 function resetPose() {
+  if (animPlaying) {
+    if (mixer?._clip0) mixer.clipAction(mixer._clip0).paused = true;
+    animPlaying = false;
+    const btn = document.getElementById('btn-anim');
+    if (btn) { btn.classList.remove('active'); btn.textContent = '⟳ Play Baked Animation'; }
+  }
+  if (applyInterval) { clearInterval(applyInterval); applyInterval = null; }
+  if (poseActive)    { poseActive = false; }
+  applySource = 'none';
+  const badge = document.getElementById('apply-badge');
+  if (badge) badge.style.display = 'none';
+
   Object.keys(bones).forEach((name) => {
     if (restQuats[name]) {
       bones[name].quaternion.copy(restQuats[name]);
@@ -805,8 +817,7 @@ function setApplySource(source) {
   if (applyInterval) { clearInterval(applyInterval); applyInterval = null; }
   if (poseActive)    { poseActive = false; }
   if (animPlaying)   {
-    // Pause rather than stop so the action can be resumed cleanly
-    if (mixer) mixer._actions?.forEach(a => { a.paused = true; });
+    if (mixer?._clip0) mixer.clipAction(mixer._clip0).paused = true;
     animPlaying = false;
   }
 
@@ -938,21 +949,26 @@ function wireUI() {
     if (!mixer) return;
     const btn = document.getElementById('btn-anim');
     if (animPlaying) {
-      mixer.stopAllAction();
+      // Pause in place — don't reset to frame 0
+      const action = mixer.clipAction(mixer._clip0);
+      action.paused = true;
       animPlaying = false;
       btn.classList.remove('active');
       btn.textContent = '⟳ Play Baked Animation';
     } else {
-      if (poseActive) { poseActive = false; poseRunning = false; resetPose(); }
+      if (poseActive) { poseActive = false; poseRunning = false; }
       setApplySource('none');
-      mixer.clipAction(mixer._clip0).reset().play();
+      const action = mixer.clipAction(mixer._clip0);
+      if (!action.isRunning()) {
+        action.reset().play();
+      } else {
+        action.paused = false;
+      }
       animPlaying = true;
       btn.classList.add('active');
       btn.textContent = '⏸ Pause Baked Animation';
     }
   });
-
-  document.getElementById('btn-reset-pose').addEventListener('click', resetPose);
 
   document.getElementById('btn-skeleton').addEventListener('click', () => {
     if (skeletonHelper) {
